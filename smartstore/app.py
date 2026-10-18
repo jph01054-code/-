@@ -337,6 +337,8 @@ class App:
 
 
 def main():
+    from .tk_runtime import configure_tk_paths
+    configure_tk_paths()
     root=tk.Tk()
     App(root)
     root.mainloop()

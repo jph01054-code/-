@@ -26,6 +26,7 @@ def show_error(path):
     message = ('프로그램 시작에 실패했습니다.\n\n'
                'install.bat을 실행한 뒤 start.bat을 다시 실행하세요.\n'
                'Python 설치에는 Tcl/Tk가 포함되어 있어야 합니다.\n\n')
+    message += 'init.tcl 오류라면 Python 설치 파일의 Modify에서 tcl/tk and IDLE을 확인하고 Repair를 진행하세요.\n\n'
     message += f'오류 기록: {path}' if path else '오류 기록을 저장하지 못했습니다. 검은 창의 오류를 확인하세요.'
     if os.name == 'nt':
         try:
@@ -37,6 +38,8 @@ def show_error(path):
 
 
 def start_application(check=False):
+    from .tk_runtime import configure_tk_paths
+    configure_tk_paths()
     import tkinter as tk
     from .app import App
     root = tk.Tk()

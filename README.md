@@ -17,8 +17,11 @@ ON/OFF, 판매 링크, 제품 상태, 옵션 검색·체크, 티켓팅 시작 �
 - **Python 관련 오류**: Python 3.11 이상 설치 시 Tcl/Tk, Python Launcher와 Add Python to PATH를 포함하세요.
 - **설치 실패**: 검은 창의 마지막 오류 문구를 확인하세요. 설치 성공 메시지가 나오기 전에는 설치가 완료된 것이 아닙니다.
 - **프로그램 시작 실패**: 새 버전은 오류 안내 창을 띄우고 `%LOCALAPPDATA%\SmartStoreAssistantV2\startup-error.log`에 원인을 저장합니다.
+- **Can't find a usable init.tcl**: Python의 화면 구성용 Tcl 데이터 파일을 찾지 못한 상태입니다. 최신 버전은 현재 Python에 함께 설치된 Tcl/Tk 경로를 확인하고, 파일이 존재할 때 해당 프로세스에서만 경로를 연결합니다. 파일이 없거나 오류가 계속되면 Python 설치 프로그램의 Modify에서 **tcl/tk and IDLE**을 추가하세요. 이미 선택되어 있다면 설치 프로그램의 **Repair**를 실행하세요. 임의의 Tcl 파일을 다운로드하거나 다른 Python 버전의 파일을 복사하지 마세요.
 
 ZIP 안에서 바로 실행하지 말고 전체 압축을 해제한 폴더에서 실행하세요. `diagnose.bat`으로 브라우저나 구매를 시작하지 않고 GUI 생성 여부만 확인할 수 있습니다.
+
+설치 과정에서도 실제 GUI 생성 검사를 먼저 실행합니다. Windows에서 앱 화면 생성까지 성공한 경우에만 의존성 설치를 계속합니다.
 
 이 배포본은 Python 소스이며 EXE는 포함하지 않습니다.
 

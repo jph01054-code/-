@@ -16,9 +16,9 @@ if not exist ".venv\Scripts\python.exe" (
   %TASK_PYTHON_CMD% -m venv .venv
   if errorlevel 1 goto failed
 )
-".venv\Scripts\python.exe" -c "import tkinter"
+".venv\Scripts\python.exe" -m smartstore.launcher --check
 if errorlevel 1 (
-  echo Tcl/Tk is missing. Modify your Python installation and enable Tcl/Tk.
+  echo GUI check failed. Modify your Python installation to include Tcl/Tk, or run Repair.
   goto failed
 )
 ".venv\Scripts\python.exe" -m pip install -r requirements.txt
