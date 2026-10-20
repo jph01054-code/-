@@ -76,7 +76,7 @@ class CheckoutTests(BrowserFixture):
         self.assertEqual(self.page.evaluate('window.payClicks'),1)
         self.assertEqual(self.page.evaluate('window.authClicks'),1)
         self.assertEqual(session.password,'')
-        self.assertTrue(any(kind=='selected' and value=='블랙' for kind,value in events))
+        self.assertTrue(any(kind=='selected_groups' and value==['블랙'] for kind,value in events))
         self.assertFalse(any('123456' in str(value) for _,value in events))
 
 

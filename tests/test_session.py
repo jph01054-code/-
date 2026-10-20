@@ -59,4 +59,4 @@ class SessionTests(unittest.TestCase):
         with self.assertRaises(NeedsReview):
             s.monitor(page,'https://practice.invalid/products/1')
         self.assertEqual(page.reload.call_count,5)
-        self.assertEqual([c.args[1] for c in s.idle.call_args_list],[2,4,8,16])
+        self.assertEqual([c.args[1] for c in s.idle.call_args_list],[2,4,5,5])

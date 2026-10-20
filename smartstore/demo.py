@@ -1,12 +1,15 @@
 """An entirely local, explicitly labelled shopping and payment practice flow."""
 from html import escape
 from urllib.parse import urlsplit, parse_qs
+import json
 from .rules import defaults, CARDS
 
 DEMO_URL = 'https://practice.invalid/products/1'
 
 
 def product_html(settings, stocked):
+    if settings.no_options or len(settings.groups)>1:
+        return grouped_product_html(settings,stocked)
     labels = ['화이트','블랙'] if settings.option.strip() in {'화이트','블랙'} else [settings.option]
     buttons = ''.join(
         '<button role="option" onclick="choose(this.textContent)">'+escape(label)+'</button>'
@@ -26,16 +29,35 @@ def product_html(settings, stocked):
 </html>'''
 
 
+def grouped_product_html(settings,stocked):
+    selects=[]
+    for index,spec in enumerate(settings.groups):
+        labels=(['화이트','블랙'] if index==0 and spec.query in {'화이트','블랙'} else
+                ['S','M','L','XL'] if index==1 else [spec.query or f'옵션 {index+1} A'])
+        choices=''.join(f'<option value="{escape(label,quote=True)}">{escape(label)}</option>' for label in labels)
+        selects.append(f'<label>옵션 {index+1} <select aria-label="옵션 {index+1}"><option value="" disabled selected>선택</option>{choices}</select></label>')
+    controls=''.join(selects)
+    disabled='' if stocked else 'disabled'
+    return f'''<!doctype html><html lang="ko"><meta charset="utf-8"><title>연습 상점 — 실제 주문 없음</title>
+<body style="font:20px sans-serif;margin:40px"><h1>연습 모드 · 실제 결제 없음</h1>
+<p>{'구매가능' if stocked else '일시 품절'}</p>{controls}
+<label>수량 <input id="qty" title="수량" value="1" type="number"></label>
+<a role="button" href="#" aria-disabled="{'false' if stocked else 'true'}" onclick="if(this.getAttribute('aria-disabled')==='true')return false;location.href='/order?quantity='+document.querySelector('#qty').value+'&options='+encodeURIComponent(JSON.stringify(Array.from(document.querySelectorAll('select')).map(e=>e.options[e.selectedIndex].text)));return false">Npay 구매하기</a>
+</body></html>'''
+
+
 def order_html(quantity, settings=None, option=None):
     settings = settings or defaults()
-    option = option or settings.option
+    option = option if option is not None else settings.option
+    options=option if isinstance(option,(list,tuple)) else ([option] if option else [])
+    option_html=''.join(f'<p>{escape(label)}</p>' for label in options)
     total = 40000 * quantity + 3000
     cards = ''.join('<label><input type="radio" name="card" '+('checked ' if i==0 else '')+
                     '>'+escape(card)+'</label><br>' for i,card in enumerate(CARDS))
     return f'''<!doctype html><html lang="ko"><meta charset="utf-8"><title>연습 주문 화면</title>
 <body style="font:18px sans-serif;margin:50px"><header>연습 모드 · 실제 결제 없음</header>
 <h1>연습 주문 화면</h1>
-<article><a href="{escape(settings.url,quote=True)}">연습 상품</a><p>{escape(option)}</p><p>수량 {quantity}개</p></article>
+<article><a href="{escape(settings.url,quote=True)}">연습 상품</a>{option_html}<p>수량 {quantity}개</p></article>
 <label>Npay 포인트 사용 <input id="points" type="number" value="0" oninput="update()"></label>
 <label><input id="all" type="checkbox" onchange="document.querySelector('#points').value=this.checked?10000:0;update()">포인트 전액사용</label>
 <p>연습용 보유 포인트 10,000원</p>
@@ -63,7 +85,8 @@ class DemoStore:
         elif u.path == '/order':
             query = parse_qs(u.query)
             quantity = int(query.get('quantity', ['1'])[0])
-            option = query.get('option', [self.settings.option])[0]
+            option = (json.loads(query['options'][0]) if 'options' in query else
+                      query.get('option', [self.settings.option])[0])
             content = order_html(quantity,self.settings,option)
         else:
             route.fulfill(status=404, body='Not found')

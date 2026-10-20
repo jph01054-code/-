@@ -14,8 +14,9 @@ class BrowserFixture(unittest.TestCase):
     def setUpClass(cls):
         cls.p=sync_playwright().start()
         try:
-            cls.browser=cls.p.chromium.launch(headless=True,
-                executable_path=os.getenv('TEST_CHROMIUM_PATH'))
+            executable=os.getenv('TEST_CHROMIUM_PATH')
+            cls.browser=cls.p.chromium.launch(headless=True,executable_path=executable,
+                channel='chrome' if os.name=='nt' and not executable else None)
         except Exception:
             cls.p.stop()
             raise

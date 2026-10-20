@@ -23,8 +23,7 @@ if errorlevel 1 (
 )
 ".venv\Scripts\python.exe" -m pip install -r requirements.txt
 if errorlevel 1 goto failed
-".venv\Scripts\python.exe" -m playwright install chromium
-if errorlevel 1 goto failed
+echo Google Chrome must be installed separately. The program uses your installed Chrome.
 echo Installation completed. Run start.bat.
 if /I not "%~1"=="--from-start" pause
 exit /b 0

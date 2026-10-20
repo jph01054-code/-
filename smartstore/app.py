@@ -1,16 +1,25 @@
-"""A single, compact Windows control panel."""
-from queue import Queue, Empty
+"""Black, enlarged, scrollable control panel for a half-screen window."""
+from queue import Queue,Empty
 import os
 import tkinter as tk
-from tkinter import ttk, messagebox
-from .rules import Settings, now_kst, CARDS
-from .storage import data_dir, load, save
+import tkinter.font as tkfont
+from tkinter import ttk,messagebox
+from .rules import Settings,OptionSpec,now_kst,CARDS
+from .storage import data_dir,load,save
 from .session import Session
 from .hotkeys import WindowsHotkeys
 from .browser import normalized
+from .time_fields import split_time,join_time
+from .window_layout import desktop_halves,Bounds
 
-PHASES={'idle':'OFF','opening':'브라우저 시작','ready':'준비','scheduled':'예약 대기',
-        'watching':'ON · 감시 중','choice':'옵션 선택 필요','paused':'일시정지',
+BG='#080a0d'
+CARD='#14181d'
+INPUT='#20262e'
+FG='#f4f7fb'
+MUTED='#a8b3c0'
+GREEN='#43dd92'
+PHASES={'idle':'OFF','opening':'크롬 시작','ready':'준비','scheduled':'예약 대기',
+        'watching':'ON · 감시 중','choice':'옵션 입력/선택 필요','paused':'일시정지',
         'review':'직접 확인 필요','error':'오류','finished':'OFF'}
 
 
@@ -21,13 +30,17 @@ class App:
         self.directory=data_dir()
         self.config_path=self.directory/'settings.json'
         self.phase='idle'
-        self.previous_phase='watching'
         self.closing=False
         self.editors=[]
-        self.option_labels=[]
-        self.displayed_labels=None
         self.vars={}
+        self.group_vars=[]
+        self.group_rows=[]
+        self.group_metadata=[]
+        self.cached_specs=()
+        self.detected_count=None
+        self.rebuilding=False
         settings,warning=load(self.config_path)
+        self.cached_specs=settings.option_groups or (OptionSpec(settings.option,settings.selected_option),)
         self.build(settings)
         if warning:
             self.log(warning)
@@ -38,181 +51,312 @@ class App:
             for key,fn in [('<F8>',self.turn_on),('<F9>',self.pause),('<F10>',self.stop)]:
                 root.bind(key,lambda event,action=fn:action())
         root.protocol('WM_DELETE_WINDOW',self.close)
-        root.after(100,self.poll)
+        self.fit_after=root.after(100,self.fit_window)
+        self.poll_after=root.after(100,self.poll)
+
+    def font(self,size=10,bold=False):
+        pixels=max(1,round(self.root.winfo_fpixels('1p')*size*1.25))
+        return (self.font_family,-pixels,'bold' if bold else 'normal')
+
+    def fit_window(self):
+        _,area=desktop_halves(self.root)
+        border=max(0,self.root.winfo_rootx()-self.root.winfo_x())
+        top=max(0,self.root.winfo_rooty()-self.root.winfo_y())
+        self.root.geometry(Bounds(area.left,area.top,max(360,area.width-2*border),
+                                  max(520,area.height-top-border)).geometry())
 
     def build(self,settings):
         root=self.root
-        root.title('스마트스토어 자동 클릭')
-        root.geometry('1000x860')
-        root.minsize(940,820)
+        available={name.casefold() for name in tkfont.families(root)}
+        self.font_family=next((name for name in ('맑은 고딕','Malgun Gothic','Noto Sans CJK KR','Arial','Helvetica')
+                               if name.casefold() in available),tkfont.nametofont('TkDefaultFont').actual('family'))
+        root.title('스마트스토어 자동 클릭 · BLACK')
+        _,area=desktop_halves(root)
+        root.geometry(area.geometry())
+        root.minsize(360,520)
+        root.configure(background=BG)
+        root.option_add('*Font',self.font())
+        root.option_add('*TCombobox*Listbox.font',self.font())
+        root.option_add('*TCombobox*Listbox.background',INPUT)
+        root.option_add('*TCombobox*Listbox.foreground',FG)
         style=ttk.Style()
         style.theme_use('clam')
-        style.configure('TFrame',background='#f6f8f9')
-        style.configure('TLabel',background='#f6f8f9',font=('맑은 고딕',10))
-        style.configure('TLabelframe',background='#f6f8f9',borderwidth=1)
-        style.configure('TLabelframe.Label',background='#f6f8f9',font=('맑은 고딕',11,'bold'))
-        style.configure('TCheckbutton',background='#f6f8f9',font=('맑은 고딕',10))
-        style.configure('TRadiobutton',background='#f6f8f9',font=('맑은 고딕',10))
-        style.configure('TButton',padding=(10,8),font=('맑은 고딕',10))
-        style.configure('Title.TLabel',font=('맑은 고딕',21,'bold'),foreground='#19362c')
-        style.configure('State.TLabel',font=('맑은 고딕',13,'bold'),foreground='#16854e')
-        outer=ttk.Frame(root,padding=20)
-        outer.pack(fill='both',expand=True)
-        header=ttk.Frame(outer)
+        for name in ('TFrame','TLabelframe'):
+            style.configure(name,background=CARD)
+        style.configure('TLabel',background=CARD,foreground=FG,font=self.font())
+        style.configure('TLabelframe.Label',background=CARD,foreground=GREEN,font=self.font(11,True))
+        for name in ('TCheckbutton','TRadiobutton'):
+            style.configure(name,background=CARD,foreground=FG,font=self.font())
+            style.map(name,background=[('active',INPUT)],foreground=[('disabled','#66717f')])
+        for name in ('TEntry','TCombobox','TSpinbox'):
+            style.configure(name,fieldbackground=INPUT,background=INPUT,foreground=FG,
+                            insertcolor=FG,font=self.font(),bordercolor='#353d48',arrowsize=18)
+            style.map(name,fieldbackground=[('disabled','#111419'),('readonly',INPUT)],
+                      foreground=[('disabled','#66717f'),('readonly',FG)])
+        style.configure('TButton',padding=(10,8),font=self.font(),background=INPUT,foreground=FG)
+        style.map('TButton',background=[('active','#304036')])
+        style.configure('Vertical.TScrollbar',background=INPUT,troughcolor=BG,arrowcolor=FG)
+        header=ttk.Frame(root,padding=(16,12))
         header.pack(fill='x')
-        ttk.Label(header,text='스마트스토어 자동 클릭',style='Title.TLabel').pack(side='left')
-        self.on=tk.BooleanVar(value=False)
-        ttk.Checkbutton(header,text='프로그램 ON / OFF',variable=self.on,command=self.toggle).pack(side='right')
+        ttk.Label(header,text='스마트스토어 자동 클릭',font=self.font(21,True),foreground=GREEN).pack(anchor='w')
+        line=ttk.Frame(header)
+        line.pack(fill='x',pady=(8,0))
         self.clock=tk.StringVar()
-        ttk.Label(outer,textvariable=self.clock,foreground='#6b7785').pack(anchor='w',pady=(4,12))
+        ttk.Label(line,textvariable=self.clock,foreground=MUTED,font=self.font(9)).pack(side='left')
+        self.on=tk.BooleanVar(value=False)
+        ttk.Checkbutton(line,text='프로그램 ON / OFF',variable=self.on,command=self.toggle).pack(side='right')
+        holder=ttk.Frame(root)
+        holder.pack(fill='both',expand=True)
+        self.canvas=tk.Canvas(holder,background=BG,highlightthickness=0)
+        scrollbar=ttk.Scrollbar(holder,orient='vertical',command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side='right',fill='y')
+        self.canvas.pack(side='left',fill='both',expand=True)
+        self.body=ttk.Frame(self.canvas,padding=12)
+        self.body_window=self.canvas.create_window((0,0),window=self.body,anchor='nw')
+        self.body.bind('<Configure>',lambda event:self.canvas.configure(scrollregion=self.canvas.bbox('all')))
+        self.canvas.bind('<Configure>',self.resize_body)
+        root.bind_all('<MouseWheel>',self.scroll)
+        root.bind_all('<Button-4>',lambda event:self.canvas.yview_scroll(-3,'units'))
+        root.bind_all('<Button-5>',lambda event:self.canvas.yview_scroll(3,'units'))
         values=settings.to_dict()
-        values['start_time']=settings.start_at.strftime('%Y-%m-%d %H:%M:%S')
-        for key in ['url','option','quantity','limit','start_time','interval','duration','points_amount']:
+        for key in ('url','quantity','limit','interval','duration','points_amount','card','points_mode'):
             self.vars[key]=tk.StringVar(value=str(values[key]))
-        self.vars['card']=tk.StringVar(value=values['card'])
-        self.vars['points_mode']=tk.StringVar(value=values['points_mode'])
         self.vars['mode']=tk.StringVar(value='demo')
-        self.buy=tk.BooleanVar(value=values['action']=='prepare')
-        self.auto_pay=tk.BooleanVar(value=values['auto_pay'])
+        self.time_vars={key:tk.StringVar(value=value) for key,value in
+                        split_time(settings.start_at.strftime('%Y-%m-%d %H:%M:%S')).items()}
+        self.buy=tk.BooleanVar(value=settings.action=='prepare')
+        self.auto_pay=tk.BooleanVar(value=settings.auto_pay)
+        self.no_options=tk.BooleanVar(value=settings.no_options)
         self.password=tk.StringVar()
-        self.selection=tk.StringVar(value=values['selected_option'])
-        grid=ttk.Frame(outer)
-        grid.pack(fill='x')
-        grid.columnconfigure(0,weight=3)
-        grid.columnconfigure(1,weight=2)
-        left=ttk.LabelFrame(grid,text='상품',padding=14)
-        left.grid(row=0,column=0,sticky='nsew',padx=(0,8))
-        right=ttk.LabelFrame(grid,text='구매 · 결제',padding=14)
-        right.grid(row=0,column=1,sticky='nsew',padx=(8,0))
-        left.columnconfigure(0,weight=1)
-        ttk.Label(left,text='판매 링크').grid(row=0,column=0,sticky='w')
-        self.entry(left,'url',1)
+        self.columns=ttk.Frame(self.body)
+        self.columns.pack(fill='x')
+        self.columns.columnconfigure(0,weight=1)
+        self.columns.columnconfigure(1,weight=1)
+        self.left=ttk.LabelFrame(self.columns,text='상품 · 제품 수량',padding=14)
+        self.right=ttk.LabelFrame(self.columns,text='구매 · 결제',padding=14)
+        self.left.columnconfigure(0,weight=1)
+        self.right.columnconfigure(0,weight=1)
+        ttk.Label(self.left,text='판매 링크').pack(anchor='w')
+        self.entry(self.left,'url')
         self.stock=tk.StringVar(value='확인 전')
-        ttk.Label(left,text='제품 상태').grid(row=2,column=0,sticky='w',pady=(12,0))
-        ttk.Label(left,textvariable=self.stock,style='State.TLabel').grid(row=3,column=0,sticky='w',pady=3)
-        ttk.Label(left,text='제품 옵션 · 포함된 문구 검색 (예: 블랙)').grid(row=4,column=0,sticky='w',pady=(12,0))
-        self.entry(left,'option',5)
-        self.vars['option'].trace_add('write',self.search_changed)
-        ttk.Label(left,text='제품 옵션 (필수) · 하나만 체크').grid(row=6,column=0,sticky='w',pady=(12,6))
-        self.option_frame=ttk.Frame(left)
-        self.option_frame.grid(row=7,column=0,sticky='nsew')
-        self.option_note=ttk.Label(left,text='브라우저에서 읽은 옵션을 표시합니다.',foreground='#6b7785',wraplength=450)
-        self.option_note.grid(row=8,column=0,sticky='w',pady=6)
-        self.selected_text=tk.StringVar(value='선택: —')
-        ttk.Label(left,textvariable=self.selected_text,foreground='#16854e',wraplength=450).grid(row=9,column=0,sticky='w')
-        qty=ttk.Frame(left)
-        qty.grid(row=10,column=0,sticky='ew',pady=(14,0))
+        self.purchase_status=tk.StringVar(value='구매 버튼: 확인 전')
+        ttk.Label(self.left,textvariable=self.stock,foreground=GREEN,font=self.font(13,True)).pack(anchor='w',pady=8)
+        ttk.Label(self.left,textvariable=self.purchase_status,foreground=MUTED).pack(anchor='w')
+        self.option_count=tk.StringVar(value='옵션 개수: 브라우저에서 확인 전')
+        ttk.Label(self.left,textvariable=self.option_count).pack(anchor='w',pady=(14,4))
+        ttk.Checkbutton(self.left,text='제품 옵션 없음',variable=self.no_options,
+                        command=self.no_options_changed).pack(anchor='w',pady=4)
+        self.option_frame=ttk.Frame(self.left)
+        self.option_frame.pack(fill='x',pady=6)
+        self.rebuild_groups(settings.option_groups or (OptionSpec(settings.option,settings.selected_option),))
+        qty=ttk.Frame(self.left)
+        qty.pack(fill='x',pady=(12,0))
         ttk.Label(qty,text='제품 수량').pack(side='left')
-        q=ttk.Entry(qty,textvariable=self.vars['quantity'],width=7)
-        q.pack(side='left',padx=12)
-        self.editors.append((q,'normal'))
+        entry=ttk.Spinbox(qty,from_=1,to=99,textvariable=self.vars['quantity'],width=5)
+        entry.pack(side='left',padx=12)
+        self.editors.append((entry,'normal'))
         ttk.Label(qty,text='개').pack(side='left')
-        right.columnconfigure(0,weight=1)
-        purchase=ttk.Checkbutton(right,text='구매하기 · 옵션/수량 선택 후 주문 화면',variable=self.buy,command=self.buy_changed)
-        purchase.grid(row=0,column=0,sticky='w',pady=(0,12))
-        self.editors.append((purchase,'normal'))
-        ttk.Label(right,text='Npay 포인트 사용').grid(row=1,column=0,sticky='w')
-        points=ttk.Frame(right)
-        points.grid(row=2,column=0,sticky='w',pady=5)
+        for parent,text,var,command in [(self.right,'구매하기',self.buy,self.buy_changed),
+                                        (self.right,'한도 내 결제하기까지 자동 클릭',self.auto_pay,None)]:
+            widget=ttk.Checkbutton(parent,text=text,variable=var,command=command)
+            widget.pack(anchor='w',pady=(0,8))
+            self.editors.append((widget,'normal'))
+        ttk.Label(self.right,text='Npay 포인트 사용').pack(anchor='w',pady=(8,0))
+        points=ttk.Frame(self.right)
+        points.pack(fill='x',pady=4)
         for value,label in [('none','사용 안함'),('amount','금액 지정'),('all','전액사용')]:
             r=ttk.Radiobutton(points,text=label,value=value,variable=self.vars['points_mode'])
             r.pack(side='left',padx=(0,8))
             self.editors.append((r,'normal'))
-        self.entry(right,'points_amount',3)
-        ttk.Label(right,text='금액 지정 시 사용할 포인트 (원)',foreground='#6b7785').grid(row=4,column=0,sticky='w')
-        ttk.Label(right,text='다른 결제수단').grid(row=5,column=0,sticky='w',pady=(12,4))
-        card=ttk.Combobox(right,textvariable=self.vars['card'],values=CARDS,state='readonly')
-        card.grid(row=6,column=0,sticky='ew',ipady=4)
+        self.entry(self.right,'points_amount')
+        ttk.Label(self.right,text='금액 지정 시 사용할 포인트 (원)',foreground=MUTED,font=self.font(9)).pack(anchor='w')
+        ttk.Label(self.right,text='다른 결제수단').pack(anchor='w',pady=(12,4))
+        card=ttk.Combobox(self.right,textvariable=self.vars['card'],values=CARDS,state='readonly')
+        card.pack(fill='x',ipady=4)
         self.editors.append((card,'readonly'))
-        ttk.Label(right,text='배송 방법: 택배').grid(row=7,column=0,sticky='w',pady=10)
-        ttk.Label(right,text='배송비 포함 최대 결제금액 (원)').grid(row=8,column=0,sticky='w')
-        self.entry(right,'limit',9)
-        pay=ttk.Checkbutton(right,text='한도 내 결제하기 버튼까지 자동 클릭',variable=self.auto_pay)
-        pay.grid(row=10,column=0,sticky='w',pady=8)
-        self.editors.append((pay,'normal'))
-        ttk.Label(right,text='결제 비밀번호').grid(row=11,column=0,sticky='w')
-        secret=ttk.Entry(right,textvariable=self.password,show='●')
-        secret.grid(row=12,column=0,sticky='ew',ipady=4,pady=4)
+        ttk.Label(self.right,text='배송 방법: 택배').pack(anchor='w',pady=10)
+        ttk.Label(self.right,text='배송비 포함 최대 결제금액 (원)').pack(anchor='w')
+        self.entry(self.right,'limit')
+        ttk.Label(self.right,text='결제 비밀번호').pack(anchor='w',pady=(8,0))
+        secret=ttk.Entry(self.right,textvariable=self.password,show='●')
+        secret.pack(fill='x',ipady=4,pady=4)
         self.editors.append((secret,'normal'))
-        ttk.Label(right,text='이번 실행에만 사용 · 파일 저장 안함',foreground='#6b7785').grid(row=13,column=0,sticky='w')
-        timing=ttk.LabelFrame(outer,text='시작 시간',padding=12)
+        ttk.Label(self.right,text='이번 실행에만 사용 · 파일 저장 안함',foreground=MUTED,font=self.font(9)).pack(anchor='w')
+        timing=ttk.LabelFrame(self.body,text='티켓팅 시작 시간 · 한국시간',padding=14)
         timing.pack(fill='x',pady=12)
-        ttk.Label(timing,text='티켓팅 시작 시간 (한국시간)').grid(row=0,column=0,sticky='w',padx=(0,12))
-        start=ttk.Entry(timing,textvariable=self.vars['start_time'],width=23)
-        start.grid(row=0,column=1,sticky='w')
-        self.editors.append((start,'normal'))
-        ttk.Label(timing,text='YYYY-MM-DD HH:MM:SS').grid(row=0,column=2,padx=10,sticky='w')
-        ttk.Label(timing,text='새로고침 간격').grid(row=1,column=0,sticky='w',pady=(8,0))
-        interval=ttk.Entry(timing,textvariable=self.vars['interval'],width=8)
-        interval.grid(row=1,column=1,sticky='w',pady=(8,0))
+        for parts in [('year','month','day'),('ampm','hour','minute','second')]:
+            line=ttk.Frame(timing)
+            line.pack(fill='x',pady=4)
+            labels={'year':'년','month':'월','day':'일','ampm':'','hour':'시','minute':'분','second':'초'}
+            ranges={'month':range(1,13),'day':range(1,32),'hour':range(1,13),'minute':range(60),'second':range(60)}
+            for key in parts:
+                if key=='year':
+                    entry=ttk.Entry(line,textvariable=self.time_vars[key],width=5)
+                    state='normal'
+                else:
+                    options=('AM','PM') if key=='ampm' else tuple(f'{v:02}' for v in ranges[key])
+                    entry=ttk.Combobox(line,textvariable=self.time_vars[key],values=options,
+                                       width=4 if key=='ampm' else 3,state='readonly')
+                    state='readonly'
+                entry.pack(side='left',padx=(0,4),ipady=4)
+                self.editors.append((entry,state))
+                if labels[key]:
+                    ttk.Label(line,text=labels[key]).pack(side='left',padx=(0,8))
+        refresh=ttk.Frame(timing)
+        refresh.pack(fill='x',pady=(10,0))
+        ttk.Label(refresh,text='새로고침').pack(side='left')
+        interval=ttk.Spinbox(refresh,from_=.1,to=5,increment=.1,textvariable=self.vars['interval'],width=5)
+        interval.pack(side='left',padx=10)
         self.editors.append((interval,'normal'))
-        ttk.Label(timing,text='초 · 1초 이상 / 서버 지연에 따라 달라집니다.').grid(row=1,column=2,sticky='w',padx=10,pady=(8,0))
-        modes=ttk.Frame(outer)
+        ttk.Label(refresh,text='초 (0.1~5초)').pack(side='left')
+        ttk.Label(timing,text='응답 완료 후 간격입니다. 서버 응답 시간은 별도입니다.',
+                  foreground=MUTED,font=self.font(9),wraplength=500).pack(anchor='w',pady=(6,0))
+        modes=ttk.LabelFrame(self.body,text='실행',padding=14)
         modes.pack(fill='x')
-        for value,label in [('demo','연습 · 실제 결제 없음'),('live','실제 상품')]:
-            r=ttk.Radiobutton(modes,text=label,value=value,variable=self.vars['mode'])
-            r.pack(side='left',padx=(0,16))
-            self.editors.append((r,'normal'))
-        ttk.Label(modes,text='최대 감시').pack(side='left',padx=(10,4))
-        duration=ttk.Entry(modes,textvariable=self.vars['duration'],width=5)
-        duration.pack(side='left')
+        for value,label in [('demo','연습 · 실제 결제 없음'),('live','실제 상품 · Google Chrome')]:
+            radio=ttk.Radiobutton(modes,text=label,value=value,variable=self.vars['mode'])
+            radio.pack(anchor='w',pady=3)
+            self.editors.append((radio,'normal'))
+        line=ttk.Frame(modes)
+        line.pack(fill='x',pady=(8,0))
+        ttk.Label(line,text='최대 감시').pack(side='left')
+        duration=ttk.Entry(line,textvariable=self.vars['duration'],width=4)
+        duration.pack(side='left',padx=8)
         self.editors.append((duration,'normal'))
-        ttk.Label(modes,text='분').pack(side='left',padx=4)
-        ttk.Button(modes,text='로그인 브라우저 열기',command=self.login).pack(side='right')
+        ttk.Label(line,text='분').pack(side='left')
+        ttk.Button(modes,text='크롬 열기 · 로그인 확인',command=self.login).pack(fill='x',pady=(10,0))
+        footer=ttk.Frame(root,padding=(16,10))
+        footer.pack(fill='x')
         self.phase_var=tk.StringVar(value='OFF')
-        self.message=tk.StringVar(value='설정 후 오른쪽 위 ON을 켜세요. 처음에는 연습 모드로 확인하세요.')
+        self.message=tk.StringVar(value='설정 후 ON · 크롬 왼쪽 / 프로그램 오른쪽')
         self.amount=tk.StringVar(value='결제금액: 확인 전')
-        status=ttk.Frame(outer)
-        status.pack(fill='x',pady=(12,4))
-        ttk.Label(status,textvariable=self.phase_var,style='State.TLabel').pack(side='left')
-        ttk.Label(status,textvariable=self.amount).pack(side='right')
-        ttk.Label(outer,textvariable=self.message,wraplength=950).pack(anchor='w')
-        self.logs=tk.Text(outer,height=4,state='disabled',wrap='word',background='#eef2f3',relief='flat',font=('맑은 고딕',9))
-        self.logs.pack(fill='both',expand=True,pady=(8,0))
-        self.render_options()
+        ttk.Label(footer,textvariable=self.phase_var,foreground=GREEN,font=self.font(13,True)).pack(anchor='w')
+        ttk.Label(footer,textvariable=self.amount,font=self.font(9)).pack(anchor='w',pady=3)
+        self.message_label=ttk.Label(footer,textvariable=self.message,foreground=MUTED,wraplength=550,font=self.font(9))
+        self.message_label.pack(anchor='w')
+        self.logs=tk.Text(footer,height=3,state='disabled',wrap='word',background=BG,foreground=FG,
+                          insertbackground=FG,relief='flat',font=self.font(9),padx=8,pady=6)
+        self.logs.pack(fill='x',pady=(6,0))
+        self.arrange_columns(area.width)
 
-    def entry(self,parent,key,row):
+    def resize_body(self,event):
+        self.canvas.itemconfigure(self.body_window,width=event.width)
+        self.arrange_columns(event.width)
+        if hasattr(self,'message_label'):
+            self.message_label.configure(wraplength=max(280,event.width-40))
+
+    def arrange_columns(self,width):
+        if not hasattr(self,'left'):
+            return
+        if width>=1000:
+            self.left.grid(row=0,column=0,columnspan=1,sticky='nsew',padx=(0,6))
+            self.right.grid(row=0,column=1,columnspan=1,sticky='nsew',padx=(6,0))
+        else:
+            self.left.grid(row=0,column=0,columnspan=2,sticky='ew')
+            self.right.grid(row=1,column=0,columnspan=2,sticky='ew',pady=(12,0))
+
+    def scroll(self,event):
+        # Leave open combobox dropdowns and text log scrolling to their widgets.
+        if event.widget==self.logs or str(event.widget).find('popdown')>=0:
+            return
+        self.canvas.yview_scroll(-int(event.delta/120) if abs(event.delta)>=120 else (-1 if event.delta>0 else 1),'units')
+
+    def entry(self,parent,key):
         entry=ttk.Entry(parent,textvariable=self.vars[key])
-        entry.grid(row=row,column=0,sticky='ew',ipady=4,pady=4)
+        entry.pack(fill='x',ipady=4,pady=4)
         self.editors.append((entry,'normal'))
         return entry
 
-    def search_changed(self,*_):
-        self.selection.set('')
-        self.displayed_labels=None
-        if hasattr(self,'option_frame'):
-            self.render_options()
+    def rebuild_groups(self,specs):
+        self.rebuilding=True
+        for child in self.option_frame.winfo_children():
+            child.destroy()
+        self.group_vars=[]
+        self.group_rows=[]
+        for index,spec in enumerate(specs):
+            frame=ttk.LabelFrame(self.option_frame,text=f'옵션 {index+1}',padding=8)
+            frame.pack(fill='x',pady=4)
+            query=tk.StringVar(value=spec.query)
+            selected=tk.StringVar(value=spec.selected)
+            entry=ttk.Entry(frame,textvariable=query)
+            entry.pack(fill='x',ipady=4,pady=3)
+            entry.bind('<Return>',lambda event:self.send_groups())
+            ttk.Button(frame,text='옵션 적용',command=self.send_groups).pack(anchor='e',pady=3)
+            choices=ttk.Frame(frame)
+            choices.pack(fill='x')
+            note=ttk.Label(frame,text='검색 문구 입력 (예: 블랙 / XL)',foreground=MUTED,font=self.font(9))
+            note.pack(anchor='w',pady=3)
+            self.group_vars.append((query,selected))
+            self.group_rows.append((entry,choices,note))
+            query.trace_add('write',lambda *_,i=index:self.query_changed(i))
+        self.rebuilding=False
+        self.render_groups()
+
+    def render_groups(self):
+        for index,(query,selected) in enumerate(self.group_vars):
+            entry,frame,note=self.group_rows[index]
+            entry.configure(state='disabled' if self.no_options.get() else 'normal')
+            meta=self.group_metadata[index] if index<len(self.group_metadata) else {}
+            labels=[label for label in meta.get('labels',[]) if query.get().strip() and
+                    normalized(query.get()) in normalized(label)]
+            cache=(tuple(labels),self.no_options.get(),query.get())
+            if getattr(frame,'render_cache',None)==cache:
+                continue
+            frame.render_cache=cache
+            for child in frame.winfo_children():
+                child.destroy()
+            if len(labels)==1 and not selected.get() and not self.no_options.get():
+                selected.set(labels[0])
+            for label in labels:
+                tk.Checkbutton(frame,text=label,variable=selected,onvalue=label,offvalue='',
+                    command=self.send_groups,font=self.font(),background=CARD,foreground=FG,
+                    activebackground=INPUT,activeforeground=FG,selectcolor=INPUT,
+                    disabledforeground='#66717f',anchor='w',justify='left',wraplength=450,
+                    state='disabled' if self.no_options.get() else 'normal').pack(anchor='w',fill='x')
+            note.configure(text='옵션 없음: 선택란 비활성' if self.no_options.get() else
+                           (f'검색 {len(labels)}개 / 선택: '+(selected.get() or '—')+' · 입력 후 적용/Enter' if meta else '검색 문구 입력 후 적용 (예: 블랙 / XL)'))
+
+    def query_changed(self,index):
+        if self.rebuilding:
+            return
+        self.group_vars[index][1].set('')
+        self.render_groups()
+
+    def no_options_changed(self):
+        self.render_groups()
+        self.send_groups()
+
+    def specs(self):
+        return tuple(OptionSpec(query.get().strip(),selected.get()) for query,selected in self.group_vars)
+
+    def receive_groups(self,metadata):
+        self.detected_count=len(metadata)
+        self.option_count.set(f'옵션 개수: {len(metadata)}개 확인')
+        before=self.specs()
+        if before:
+            self.cached_specs=before
+        self.group_metadata=metadata
+        if len(before)!=len(metadata):
+            specs=tuple(self.cached_specs[i] if i<len(self.cached_specs) else OptionSpec() for i in range(len(metadata)))
+            self.rebuild_groups(specs)
+            self.send_groups()
+        else:
+            self.render_groups()
+
+    def send_groups(self):
+        if self.rebuilding:
+            return
+        if self.worker and self.worker.is_alive():
+            self.worker.configure_options(self.specs(),self.no_options.get())
+        try:
+            save(self.config_path,self.settings())
+        except (ValueError,OSError,KeyError):
+            pass
 
     def buy_changed(self):
         if not self.buy.get():
             self.auto_pay.set(False)
-
-    def render_options(self):
-        query=normalized(self.vars['option'].get())
-        labels=[label for label in self.option_labels if query and query in normalized(label)]
-        if self.displayed_labels==labels:
-            return
-        self.displayed_labels=labels
-        for child in self.option_frame.winfo_children():
-            child.destroy()
-        if len(labels)==1 and not self.selection.get():
-            self.selection.set(labels[0])
-            self.option_selected()
-        for index,label in enumerate(labels,1):
-            tk.Checkbutton(self.option_frame,text=f'{index}. {label}',variable=self.selection,
-                           onvalue=label,offvalue='',command=self.option_selected,wraplength=440,
-                           justify='left',anchor='w',background='#f6f8f9',font=('맑은 고딕',10)).pack(anchor='w',pady=3)
-        self.option_note.configure(text='일치하는 옵션이 없습니다.' if not labels else f'검색 결과 {len(labels)}개')
-        self.selected_text.set('선택: '+(self.selection.get() or '—'))
-
-    def option_selected(self):
-        self.selected_text.set('선택: '+(self.selection.get() or '—'))
-        if self.worker and self.worker.is_alive():
-            self.worker.choose_option(self.selection.get())
-            try:
-                save(self.config_path,self.settings())
-            except (ValueError,OSError):
-                self.log('옵션 선택은 현재 실행에 적용했지만 파일 저장에는 실패했습니다.')
 
     def emit(self,kind,value):
         self.events.put((kind,value))
@@ -227,8 +371,14 @@ class App:
 
     def settings(self):
         values={key:var.get() for key,var in self.vars.items()}
+        specs=self.specs()
         values.update(action='prepare' if self.buy.get() else 'notify',auto_pay=self.auto_pay.get(),
-                      selected_option=self.selection.get(),opening=self.vars['start_time'].get())
+                      no_options=self.no_options.get(),option_groups=[dict(query=s.query,selected=s.selected) for s in specs],
+                      option=specs[0].query if specs else '',selected_option=specs[0].selected if specs else '',
+                      start_time=join_time({key:var.get() for key,var in self.time_vars.items()}))
+        values['opening']=values['start_time']
+        if values['points_mode']!='amount':
+            values['points_amount']=0
         return Settings.from_dict(values)
 
     def launch(self,auto_start):
@@ -240,16 +390,16 @@ class App:
             settings=self.settings()
             secret=self.password.get()
             if secret and (len(secret)!=6 or not secret.isascii() or not secret.isdigit()):
-                raise ValueError('Npay 결제 비밀번호는 6자리 숫자로 입력하거나 비워 두세요.')
+                raise ValueError('Npay 결제 비밀번호는 6자리 숫자이거나 비워 두세요.')
             save(self.config_path,settings)
             self.worker=Session(settings,self.directory,self.emit,password=secret,auto_start=auto_start)
             self.password.set('')
             self.stock.set('확인 중')
+            self.purchase_status.set('구매 버튼: 확인 중')
             self.amount.set('결제금액: 확인 전')
             for editor,_ in self.editors:
                 editor.configure(state='disabled')
-            self.phase_var.set('브라우저 시작')
-            self.message.set('실행 설정을 고정했습니다. ON이면 예약 시각에 자동 진행합니다.')
+            self.phase_var.set('크롬 시작')
             self.worker.start()
         except (ValueError,KeyError,TypeError,OSError) as exc:
             self.on.set(False)
@@ -259,10 +409,7 @@ class App:
         self.launch(False)
 
     def toggle(self):
-        if self.on.get():
-            self.launch(True)
-        else:
-            self.stop()
+        self.launch(True) if self.on.get() else self.stop()
 
     def turn_on(self):
         self.on.set(True)
@@ -281,9 +428,11 @@ class App:
         self.on.set(False)
         if self.worker and self.worker.is_alive():
             self.worker.stop_event.set()
-            self.message.set('OFF 요청 · 진행 중인 작업 종료 후 브라우저를 닫습니다.')
+            self.message.set('OFF 요청 · 진행 중인 작업 종료 후 크롬을 닫습니다.')
 
     def poll(self):
+        if self.closing:
+            return
         self.clock.set(now_kst().strftime('%Y-%m-%d %H:%M:%S KST'))
         try:
             while True:
@@ -303,12 +452,14 @@ class App:
                         self.root.bell()
                 elif kind=='stock':
                     self.stock.set(value)
-                elif kind=='options':
-                    self.option_labels=value
-                    self.render_options()
-                elif kind=='selected':
-                    self.selection.set(value)
-                    self.selected_text.set('선택: '+value)
+                elif kind=='purchase_status':
+                    self.purchase_status.set('구매 버튼: '+value)
+                elif kind=='option_groups':
+                    self.receive_groups(value)
+                elif kind=='selected_groups':
+                    for (_,selected),label in zip(self.group_vars,value):
+                        selected.set(label)
+                    self.render_groups()
                 elif kind=='amount':
                     self.amount.set('결제금액: '+(f'{value:,}원' if value is not None else '직접 확인'))
                 elif kind=='done':
@@ -320,9 +471,10 @@ class App:
                         self.message.set('세션 종료 · 새 실행 전에 주문 내역을 확인하세요.')
         except Empty:
             pass
-        self.root.after(100,self.poll)
+        self.poll_after=self.root.after(100,self.poll)
 
     def close(self):
+        self.closing=True
         self.stop()
         self.wait_close()
 
@@ -333,6 +485,11 @@ class App:
         self.password.set('')
         if self.hotkeys:
             self.hotkeys.stop()
+        for timer in (self.fit_after,self.poll_after):
+            try:
+                self.root.after_cancel(timer)
+            except tk.TclError:
+                pass
         self.root.destroy()
 
 

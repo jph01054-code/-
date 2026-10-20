@@ -3,10 +3,11 @@ from threading import Event, Thread
 from dataclasses import replace
 from queue import Queue, Empty
 import time
-from .rules import OneShot, now_kst, same_product
-from .browser import StorePage, NeedsReview, normalized
+from .rules import OneShot, now_kst, same_product, OptionSpec
+from .browser import StorePage, NeedsReview, OptionChoiceRequired
 from .demo import DemoStore, DEMO_URL
 from .checkout import CheckoutPage
+from .window_layout import desktop_halves, place_chrome
 
 
 class Stopped(Exception):
@@ -31,20 +32,50 @@ class Session(Thread):
         self.password = password
         self.auto_start = auto_start
         self.option_commands = Queue()
+        self.option_revision = 0
 
-    def choose_option(self, label):
-        self.option_commands.put(label)
+    def choose_option(self, label, index=0):
+        self.option_commands.put(('select',index,label))
 
-    def update_options(self, adapter):
-        labels = [choice.inner_text().strip() for choice in adapter.options(self.check)]
-        self.emit('options', labels)
+    def configure_options(self,groups,no_options=False):
+        self.option_commands.put(('config',tuple(groups),no_options))
+
+    def consume_options(self):
         try:
             while True:
-                label = self.option_commands.get_nowait()
-                self.settings = replace(self.settings, selected_option=label)
+                command=self.option_commands.get_nowait()
+                if command[0]=='config':
+                    self.settings=replace(self.settings,option_groups=command[1],no_options=command[2])
+                else:
+                    groups=list(self.settings.groups)
+                    while len(groups)<=command[1]:
+                        groups.append(OptionSpec())
+                    groups[command[1]]=replace(groups[command[1]],selected=command[2])
+                    self.settings=replace(self.settings,option_groups=tuple(groups))
+                self.option_revision+=1
         except Empty:
             pass
-        return labels
+
+    def update_options(self, adapter):
+        self.consume_options()
+        groups=adapter.group_snapshot(self.check)
+        self.emit('option_groups',groups)
+        return groups
+
+    def prepare_with_choices(self,adapter):
+        while True:
+            self.check()
+            self.consume_options()
+            try:
+                return adapter.prepare(self.settings,self.latch,self.check)
+            except OptionChoiceRequired as exc:
+                self.update_options(adapter)
+                revision=self.option_revision
+                self.state('choice',str(exc))
+                while self.option_revision==revision:
+                    self.idle(adapter.page,.1)
+                    self.consume_options()
+                self.state('watching','변경한 옵션으로 진행합니다.')
 
     def log(self, message):
         self.emit('log', message)
@@ -117,23 +148,15 @@ class Session(Thread):
                     failures += 1
                     self.log(f'페이지 응답 오류({status}) · 요청 간격을 늘립니다.')
                 else:
-                    # Give client-rendered pages time to expose their controls.
-                    self.idle(page, .4)
                     self.emit('stock', adapter.stock())
-                    labels = self.update_options(adapter)
-                    matches = [label for label in labels if normalized(self.settings.option) in normalized(label)]
-                    if self.settings.action == 'prepare' and len(matches) > 1 and not self.settings.selected_option:
-                        self.state('choice','검색된 옵션이 여러 개입니다. 화면에서 하나를 체크하세요.')
-                        while not self.settings.selected_option:
-                            self.idle(page,.1)
-                            self.update_options(adapter)
-                        self.state('watching','선택한 옵션으로 진행합니다.')
+                    self.emit('purchase_status',adapter.purchase_status)
+                    self.update_options(adapter)
                     if self.settings.action == 'notify':
                         if adapter.purchase_button() is not None:
                             self.hold(page, '구매 버튼 감지 · 지정 옵션의 재고는 직접 확인하세요.')
                             return
-                    elif adapter.prepare(self.settings, self.latch, self.check):
-                        self.emit('selected', adapter.selected_option)
+                    elif self.prepare_with_choices(adapter):
+                        self.emit('selected_groups', adapter.selected_options)
                         self.log('주문 화면 진입을 한 번 시도했습니다. 자동 재시도하지 않습니다.')
                         try:
                             amount = adapter.total()
@@ -150,7 +173,7 @@ class Session(Thread):
                             checkout = CheckoutPage(page,demo=demo)
                             self.log('상품·옵션·수량·포인트·카드·배송·최종 금액을 확인합니다.')
                             try:
-                                charged = checkout.submit(self.settings,adapter.selected_option,
+                                charged = checkout.submit(self.settings,adapter.selected_options,
                                                           self.payment_latch,self.check)
                                 self.emit('amount',charged)
                                 self.log('결제하기 버튼을 한 번 클릭했습니다. 결제 성공 여부는 주문 내역에서 확인하세요.')
@@ -176,7 +199,7 @@ class Session(Thread):
                 self.log('화면 응답 시간 초과 · 요청 간격을 늘립니다.')
             if failures >= 5:
                 raise NeedsReview('연속 오류 5회로 자동화를 중단했습니다.')
-            self.idle(page, min(60, self.settings.interval * 2 ** failures))
+            self.idle(page, min(5, self.settings.interval * 2 ** failures))
 
     def run(self):
         try:
@@ -184,13 +207,19 @@ class Session(Thread):
             self.state('opening', '전용 브라우저를 여는 중…')
             self.directory.mkdir(parents=True, exist_ok=True)
             with sync_playwright() as p:
+                bounds,_=desktop_halves()
                 context = p.chromium.launch_persistent_context(
                     str(self.directory / ('practice-profile' if self.settings.mode == 'demo' else 'live-profile')),
-                    headless=False, locale='ko-KR', timezone_id='Asia/Seoul',
-                    viewport={'width': 1280, 'height': 900},
+                    channel='chrome',headless=False,locale='ko-KR',timezone_id='Asia/Seoul',
+                    no_viewport=True,args=[f'--window-position={bounds.left},{bounds.top}',
+                                           f'--window-size={bounds.width},{bounds.height}'],
                 )
                 try:
                     page = context.pages[0] if context.pages else context.new_page()
+                    try:
+                        place_chrome(context,page,bounds)
+                    except Exception:
+                        self.log('크롬 창 자동 배치는 적용하지 못했습니다. 창 크기를 직접 조절할 수 있습니다.')
                     if self.settings.mode == 'demo':
                         store = DemoStore(self.settings)
                         context.route('**/*', store.handle)
@@ -206,6 +235,7 @@ class Session(Thread):
                             preview = StorePage(page,target)
                             self.emit('stock',preview.stock())
                             self.update_options(preview)
+                            preview.reveal_purchase(self.check)
                         except (NeedsReview,BrowserTimeout):
                             self.log('초기 상품 정보는 감시 시작 후 다시 확인합니다.')
                     try:
@@ -220,7 +250,7 @@ class Session(Thread):
         except Expired:
             self.log('설정한 최대 감시 시간이 지나 종료했습니다.')
         except Exception as exc:
-            self.state('error', f'실행 실패: {type(exc).__name__}. 브라우저 설치와 화면 상태를 확인하세요.')
+            self.state('error', f'실행 실패: {type(exc).__name__}. Google Chrome 설치 여부와 화면 상태를 확인하세요.')
         finally:
             self.password = ''
             self.ready_event.clear()

@@ -36,7 +36,7 @@ class SettingsTests(unittest.TestCase):
     def test_invalid_inputs(self):
         for change in [dict(url='https://brand.naver.com.evil.test/x/products/1'),
             dict(url='https://user:password@brand.naver.com/x/products/1'),
-            dict(quantity=0),dict(limit=0),dict(interval=.1),dict(interval=float('nan')),
+            dict(quantity=0),dict(limit=0),dict(interval=.09),dict(interval=5.01),dict(interval=float('nan')),
             dict(interval=float('inf')),dict(duration=0),dict(option=''),dict(mode='other'),
             dict(opening='2026-02-30 10:00:00'),dict(action='pay')]:
             with self.subTest(change=change),self.assertRaises(ValueError):

@@ -30,7 +30,8 @@ class CheckoutPage:
         if len(products) != 1 or not same_product(products[0][1],settings.url):
             raise NeedsReview('주문 상품이 한 개이며 지정한 상품인지 확인하지 못했습니다.')
         row = products[0][0].locator('xpath=ancestor::*[self::li or self::article][1]')
-        if row.count() != 1 or unique(row.get_by_text(option_pattern(option))) is None:
+        options=option if isinstance(option,(tuple,list)) else ([option] if option else [])
+        if row.count() != 1 or any(unique(row.get_by_text(option_pattern(label))) is None for label in options):
             raise NeedsReview('주문 상품의 선택 옵션을 확인하지 못했습니다.')
         quantities = re.findall(r'수량\s*(\d+)\s*개',row.inner_text())
         if quantities != [str(settings.quantity)]:

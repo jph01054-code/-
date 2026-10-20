@@ -18,6 +18,12 @@ def parse_opening(value):
 
 
 @dataclass(frozen=True)
+class OptionSpec:
+    query: str = ''
+    selected: str = ''
+
+
+@dataclass(frozen=True)
 class Settings:
     url: str
     option: str
@@ -36,9 +42,14 @@ class Settings:
     auto_pay: bool = False
     selected_option: str = ''
     start_time: str = ''
+    no_options: bool = False
+    option_groups: tuple = ()
 
     @classmethod
     def from_dict(cls, values):
+        raw_groups=values.get('option_groups',[])
+        if not isinstance(raw_groups,(tuple,list)) or any(not isinstance(group,dict) for group in raw_groups):
+            raise ValueError('옵션 그룹 설정 형식이 올바르지 않습니다.')
         return cls(
             url=str(values['url']).strip(), option=str(values['option']).strip(),
             quantity=int(str(values['quantity'])), limit=int(str(values['limit']).replace(',', '')),
@@ -50,6 +61,10 @@ class Settings:
             points_amount=int(str(values.get('points_amount', 0)).replace(',', '')),
             auto_pay=values.get('auto_pay', False), selected_option=str(values.get('selected_option', '')).strip(),
             start_time=str(values.get('start_time', '')).strip(),
+            no_options=values.get('no_options', False),
+            option_groups=tuple(OptionSpec(str(group.get('query','')).strip(),
+                                          str(group.get('selected','')).strip())
+                                for group in raw_groups),
         ).validate()
 
     def validate(self):
@@ -58,12 +73,16 @@ class Settings:
                 or u.username or u.password or u.port is not None
                 or not re.fullmatch(r'/[^/]+/products/\d+/?', u.path)):
             raise ValueError('스마트스토어 HTTPS 상품 링크를 입력하세요.')
-        if not self.option.strip() or len(self.option) > 500:
-            raise ValueError('정확한 옵션을 1~500자로 입력하세요.')
+        if not isinstance(self.no_options,bool):
+            raise ValueError('옵션 없음 선택값을 확인하세요.')
+        if not self.no_options and not any(group.query.strip() or group.selected for group in self.groups):
+            raise ValueError('옵션 문구를 입력하거나 제품 옵션 없음을 체크하세요.')
+        if any(len(group.query)>500 or len(group.selected)>500 for group in self.groups):
+            raise ValueError('각 옵션 문구는 500자 이내로 입력하세요.')
         if not 1 <= self.quantity <= 99 or not 1 <= self.limit <= 100_000_000:
             raise ValueError('수량 1~99, 한도 금액 1~100,000,000원으로 입력하세요.')
-        if not math.isfinite(self.interval) or not 1 <= self.interval <= 60:
-            raise ValueError('새로고침 간격은 1~60초입니다.')
+        if not math.isfinite(self.interval) or not .1 <= self.interval <= 5:
+            raise ValueError('새로고침 간격은 0.1~5초입니다.')
         if not 1 <= self.duration <= 180:
             raise ValueError('최대 감시 시간은 1~180분입니다.')
         if self.mode not in {'demo', 'live'} or self.action not in {'notify', 'prepare'}:
@@ -84,6 +103,12 @@ class Settings:
             parse_opening(self.start_time)
         parse_opening(self.opening)
         return self
+
+    @property
+    def groups(self):
+        if self.no_options:
+            return ()
+        return self.option_groups or (OptionSpec(self.option,self.selected_option),)
 
     @property
     def start_at(self):
